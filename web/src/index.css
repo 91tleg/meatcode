@@ -1,0 +1,31 @@
+:root { color-scheme: dark; --bg:#16181d; --panel:#1e2128; --line:#2d313a; --text:#e4e6eb; --muted:#8b909c; --accent:#f59e0b; }
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+code, pre { font-family: ui-monospace, Menlo, monospace; }
+pre { background: #12141a; padding: 8px 10px; border-radius: 6px; margin: 6px 0; overflow: auto; white-space: pre-wrap; }
+.app { display: flex; flex-direction: column; height: 100%; }
+.topbar { display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.topbar h1 { font-size: 18px; color: var(--accent); margin: 0; }
+.picker { min-width: 260px; max-width: 50vw; }
+.main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(400px, 1.4fr); }
+.desc, .work { border-right: 1px solid var(--line); overflow: auto; min-height: 0; }
+.desc { padding: 16px 20px; } .prose { white-space: pre-wrap; }
+.example { margin-top: 14px; }
+.work { display: flex; flex-direction: column; border-right: 0; }
+.toolbar { display: flex; gap: 8px; padding: 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.spacer { flex: 1; }
+button, select { background: #2d3340; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; font: inherit; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: #16a34a; border-color: #16a34a; } button.ghost { background: none; }
+.results { flex: 1; overflow: auto; padding: 10px 14px; border-top: 1px solid var(--line); }
+.diff { font-size: 12px; } .diff.easy { color: #22c55e; } .diff.medium { color: #f59e0b; } .diff.hard { color: #ef4444; }
+.muted { color: var(--muted); font-weight: normal; } .ok { color: #22c55e; } .bad { color: #ef4444; } .err { color: #fca5a5; }
+details { margin: 4px 0; } summary { cursor: pointer; } .pass summary { color: #22c55e; } .fail summary { color: #ef4444; }
+.empty { padding: 24px; }
+
+.review { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.md h2 { font-size: 15px; color: var(--accent); margin: 16px 0 4px; }
+.md p, .md li { margin: 4px 0; } .md ul, .md ol { padding-left: 20px; }
+.md code { background: #12141a; padding: 1px 5px; border-radius: 4px; }
+.md pre code { background: none; padding: 0; }
