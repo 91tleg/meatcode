@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import Markdown from 'react-markdown'
 
@@ -14,7 +14,21 @@ type TestResult = {
   passed: boolean; hidden: boolean; input: string; expected: string
   actual: string; stderr: string; status: string; ms: number
 }
-type RunResult = { compile_error: string | null; results: TestResult[]; passed: number; total: number }
+type RunResult = {
+  compile_error: string | null; results: TestResult[]; passed: number; total: number
+  submission_id?: number | null
+}
+type HistoryItem = { id: number; language: string; passed: number; total: number; created_at: number; has_review: boolean }
+
+const ago = (unix: number) => {
+  const d = Math.max(0, Date.now() / 1000 - unix)
+  if (d < 60) return 'just now'
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`
+  return `${Math.floor(d / 86400)}d ago`
+}
+const put = (url: string, body: unknown) =>
+  fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {})
 
 const LANGS = [
   { id: 'python', label: 'Python', monaco: 'python' },
@@ -31,8 +45,16 @@ export default function App() {
   const [code, setCode] = useState('')
   const [result, setResult] = useState<RunResult | null>(null)
   const [busy, setBusy] = useState(false)
+  const workRef = useRef<HTMLElement>(null)
+  const [outH, setOutH] = useState(() => {
+    try { return Number(localStorage.getItem('outH')) || 260 } catch { return 260 }
+  })
   const [mode, setMode] = useState<'run' | 'submit'>('run')
-  const [submitted, setSubmitted] = useState<{ code: string; lang: string } | null>(null)
+  const [submissionId, setSubmissionId] = useState<number | null>(null)
+  const [history, setHistory] = useState<HistoryItem[]>([])
+  const [draftVersion, setDraftVersion] = useState(0)
+  const drafts = useRef<Record<string, string>>({})
+  const saveTimers = useRef<Record<string, number>>({})
   const [review, setReview] = useState<string | null>(null)
   const [reviewing, setReviewing] = useState(false)
   const [reviewErr, setReviewErr] = useState<string | null>(null)
@@ -44,54 +66,112 @@ export default function App() {
     })
   }, [])
 
+  const refreshHistory = (sl: string) =>
+    fetch(`/api/problems/${sl}/submissions`).then(r => r.json()).then(setHistory).catch(() => {})
+
+  // Load the problem, its saved drafts and its past attempts together.
   useEffect(() => {
     if (!slug) return
-    setResult(null); setSubmitted(null); setReview(null); setReviewErr(null)
-    fetch(`/api/problems/${slug}`).then(r => r.json()).then(setProblem)
+    let stale = false
+    setResult(null); setSubmissionId(null); setReview(null); setReviewErr(null); setHistory([])
+    Promise.all([
+      fetch(`/api/problems/${slug}`).then(r => r.json()),
+      fetch(`/api/problems/${slug}/drafts`).then(r => r.json()).catch(() => ({})),
+    ]).then(([prob, d]) => {
+      if (stale) return
+      drafts.current = d
+      setProblem(prob)
+      setDraftVersion(v => v + 1)
+    })
+    refreshHistory(slug)
+    return () => { stale = true }
   }, [slug])
 
-  // Load saved draft for this problem+language, else the starter.
+  // Show the saved draft for this problem+language, else the starter.
   useEffect(() => {
     if (!problem) return
-    setCode(localStorage.getItem(`code:${problem.slug}:${lang}`) ?? problem.starter[lang] ?? '')
-  }, [problem, lang])
+    setCode(drafts.current[lang] ?? problem.starter[lang] ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [problem, lang, draftVersion])
+
+  // Autosave drafts to the database shortly after the last keystroke.
+  const saveDraft = (sl: string, lg: string, text: string) => {
+    drafts.current[lg] = text
+    window.clearTimeout(saveTimers.current[lg])
+    saveTimers.current[lg] = window.setTimeout(() => put(`/api/problems/${sl}/draft/${lg}`, { code: text }), 600)
+  }
 
   const onCode = (v?: string) => {
-    const s = v ?? ''
-    setCode(s)
-    if (problem) localStorage.setItem(`code:${problem.slug}:${lang}`, s)
+    const text = v ?? ''
+    setCode(text)
+    if (problem) saveDraft(problem.slug, lang, text)
   }
 
   const reset = () => {
     if (!problem) return
-    localStorage.removeItem(`code:${problem.slug}:${lang}`)
+    window.clearTimeout(saveTimers.current[lang])
+    delete drafts.current[lang]
+    fetch(`/api/problems/${problem.slug}/draft/${lang}`, { method: 'DELETE' }).catch(() => {})
     setCode(problem.starter[lang] ?? '')
+  }
+
+  // Load a past attempt into the editor and show its saved results and review.
+  const openAttempt = async (id: number) => {
+    if (!problem) return
+    const s = await fetch(`/api/submissions/${id}`).then(r => r.json())
+    saveDraft(problem.slug, s.language, s.code)
+    setLang(s.language); setCode(s.code)
+    setMode('submit'); setResult(s.results); setSubmissionId(s.id)
+    setReview(s.review); setReviewErr(null)
   }
 
   const run = async (submit: boolean) => {
     if (!problem) return
     setBusy(true); setMode(submit ? 'submit' : 'run'); setResult(null)
-    setReview(null); setReviewErr(null); setSubmitted(submit ? { code, lang } : null)
+    setReview(null); setReviewErr(null); setSubmissionId(null)
     try {
       const r = await fetch(`/api/problems/${problem.slug}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ language: lang, code, submit }),
       })
-      setResult(await r.json())
+      const res: RunResult = await r.json()
+      setResult(res)
+      if (submit && res.submission_id) {
+        setSubmissionId(res.submission_id)
+        refreshHistory(problem.slug)
+      }
     } finally { setBusy(false) }
   }
 
-  const askReview = async () => {
-    if (!problem || !submitted || !result) return
+  // Drag the divider up/down to resize the output panel.
+  const startDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const el = e.currentTarget
+    el.setPointerCapture(e.pointerId)
+    const startY = e.clientY, startH = outH
+    const max = () => (workRef.current?.clientHeight ?? 800) - 120
+    const move = (ev: PointerEvent) =>
+      setOutH(Math.max(48, Math.min(max(), startH + (startY - ev.clientY))))
+    const up = () => {
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+      setOutH(h => { try { localStorage.setItem('outH', String(h)) } catch {} return h })
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+  }
+
+  const askReview = async (force: boolean) => {
+    if (!problem || !submissionId) return
     setReviewing(true); setReview(null); setReviewErr(null)
     try {
-      const r = await fetch(`/api/problems/${problem.slug}/review`, {
+      const r = await fetch('/api/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ language: submitted.lang, code: submitted.code, result }),
+        body: JSON.stringify({ submission_id: submissionId, force }),
       })
-      if (r.ok) setReview((await r.json()).review)
+      if (r.ok) { setReview((await r.json()).review); refreshHistory(problem.slug) }
       else setReviewErr(await r.text())
     } catch (e) { setReviewErr(String(e)) }
     finally { setReviewing(false) }
@@ -122,22 +202,33 @@ export default function App() {
             ))}
           </section>
 
-          <section className="work">
+          <section className="work" ref={workRef}>
             <div className="toolbar">
               <select value={lang} onChange={e => { setLang(e.target.value); localStorage.setItem('lang', e.target.value) }}>
                 {LANGS.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
               </select>
               <button onClick={reset} className="ghost">Reset</button>
+              <select value="" onChange={e => e.target.value && openAttempt(Number(e.target.value))} disabled={history.length === 0}>
+                <option value="">History ({history.length})</option>
+                {history.map(h => (
+                  <option key={h.id} value={h.id}>
+                    {h.passed === h.total ? '✓' : '✗'} {h.passed}/{h.total} · {LANGS.find(l => l.id === h.language)?.label ?? h.language} · {ago(h.created_at)}{h.has_review ? ' · reviewed' : ''}
+                  </option>
+                ))}
+              </select>
               <span className="spacer" />
               <button disabled={busy} onClick={() => run(false)}>Run</button>
               <button disabled={busy} onClick={() => run(true)} className="primary">Submit</button>
             </div>
+            <div className="editor">
             <Editor
-              height="55%" theme="vs-dark" value={code} onChange={onCode}
+              height="100%" theme="vs-dark" value={code} onChange={onCode}
               language={LANGS.find(l => l.id === lang)?.monaco}
               options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true }}
             />
-            <div className="results">
+            </div>
+            <div className="divider" onPointerDown={startDrag} title="Drag to resize" />
+            <div className="results" style={{ height: outH }}>
               {busy && <p className="muted">Running…</p>}
               {result?.compile_error && <pre className="err">{result.compile_error}</pre>}
               {result && !result.compile_error && (
@@ -157,16 +248,16 @@ export default function App() {
                       {r.stderr && <pre className="err">{r.stderr}</pre>}
                     </details>
                   ))}
-                  {mode === 'submit' && (
-                    <div className="review">
-                      <button onClick={askReview} disabled={reviewing}>
-                        {reviewing ? 'Claude is reviewing…' : review ? 'Review again' : 'Review with Claude'}
-                      </button>
-                      {reviewErr && <pre className="err">{reviewErr}</pre>}
-                      {review && <div className="md"><Markdown>{review}</Markdown></div>}
-                    </div>
-                  )}
                 </>
+              )}
+              {result && !busy && mode === 'submit' && submissionId && (
+                <div className="review">
+                  <button onClick={() => askReview(!!review)} disabled={reviewing}>
+                    {reviewing ? 'Claude is reviewing…' : review ? 'Regenerate review' : 'Review with Claude'}
+                  </button>
+                  {reviewErr && <pre className="err">{reviewErr}</pre>}
+                  {review && <div className="md"><Markdown>{review}</Markdown></div>}
+                </div>
               )}
             </div>
           </section>

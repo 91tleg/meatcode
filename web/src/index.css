@@ -18,7 +18,7 @@ pre { background: #12141a; padding: 8px 10px; border-radius: 6px; margin: 6px 0;
 button, select { background: #2d3340; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; font: inherit; cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
 button.primary { background: #16a34a; border-color: #16a34a; } button.ghost { background: none; }
-.results { flex: 1; overflow: auto; padding: 10px 14px; border-top: 1px solid var(--line); }
+.results { flex: none; overflow: auto; padding: 10px 14px; border-top: 1px solid var(--line); }
 .diff { font-size: 12px; } .diff.easy { color: #22c55e; } .diff.medium { color: #f59e0b; } .diff.hard { color: #ef4444; }
 .muted { color: var(--muted); font-weight: normal; } .ok { color: #22c55e; } .bad { color: #ef4444; } .err { color: #fca5a5; }
 details { margin: 4px 0; } summary { cursor: pointer; } .pass summary { color: #22c55e; } .fail summary { color: #ef4444; }
@@ -29,3 +29,8 @@ details { margin: 4px 0; } summary { cursor: pointer; } .pass summary { color: #
 .md p, .md li { margin: 4px 0; } .md ul, .md ol { padding-left: 20px; }
 .md code { background: #12141a; padding: 1px 5px; border-radius: 4px; }
 .md pre code { background: none; padding: 0; }
+
+.editor { flex: 1; min-height: 80px; }
+.divider { height: 8px; flex: none; cursor: row-resize; background: var(--panel); border-top: 1px solid var(--line); touch-action: none; position: relative; }
+.divider::after { content: ''; position: absolute; left: 50%; top: 2px; width: 36px; height: 3px; margin-left: -18px; border-radius: 2px; background: var(--muted); }
+.divider:hover, .divider:active { background: #2d3340; }

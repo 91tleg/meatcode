@@ -4,6 +4,56 @@ use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Shorten long text (stress-test inputs can be hundreds of KB) so the review prompt stays small.
+fn clip(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}… [{n} chars total]")
+}
+
+/// Condense a stored RunResult: only failing tests get details, and everything is clipped.
+fn summarize(result: &serde_json::Value) -> String {
+    const MAX_FAILURES: usize = 5;
+    let get = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let mut out = format!(
+        "Passed {}/{} tests.\n",
+        result["passed"].as_u64().unwrap_or(0),
+        result["total"].as_u64().unwrap_or(0)
+    );
+    if let Some(e) = result["compile_error"].as_str() {
+        out += &format!("Compile error:\n{}\n", clip(e, 1500));
+    }
+    let tests = result["results"].as_array().cloned().unwrap_or_default();
+    let failed: Vec<_> = tests.iter().enumerate().filter(|(_, t)| t["passed"] != true).collect();
+    for (i, t) in failed.iter().take(MAX_FAILURES) {
+        out += &format!(
+            "\nFailed test {}{} — {} ({}ms)\n  input: {}\n  expected: {}\n  actual: {}\n",
+            i + 1,
+            if t["hidden"] == true { " (hidden)" } else { "" },
+            get(t, "status"),
+            t["ms"],
+            clip(&get(t, "input"), 300).replace('\n', " | "),
+            clip(&get(t, "expected"), 300),
+            clip(&get(t, "actual"), 300),
+        );
+        let err = get(t, "stderr");
+        if !err.is_empty() {
+            out += &format!("  stderr: {}\n", clip(&err, 600));
+        }
+    }
+    if failed.len() > MAX_FAILURES {
+        out += &format!("\n…and {} more failing tests.\n", failed.len() - MAX_FAILURES);
+    }
+    let slowest = tests.iter().filter(|t| t["passed"] == true).filter_map(|t| t["ms"].as_u64()).max();
+    if let Some(ms) = slowest {
+        out += &format!("\nSlowest passing test: {ms}ms (the time limit is 5000ms per test).\n");
+    }
+    out
+}
+
 fn prompt(p: &Problem, language: &str, code: &str, result: &serde_json::Value) -> String {
     let sig = serde_json::to_string(&p.function).unwrap_or_default();
     format!(
@@ -35,18 +85,31 @@ Function signature (JSON): {sig}
 {code}
 ```
 
-# Test results (JSON; `passed`, `status`, and for failures `input`/`expected`/`actual`)
+# Test results
 {result}
 "#,
         title = p.title,
         difficulty = p.difficulty,
         description = p.description,
+        result = summarize(result),
     )
 }
 
 pub async fn review(p: &Problem, language: &str, code: &str, result: &serde_json::Value) -> Result<String, String> {
     let mut child = Command::new("claude")
-        .args(["-p", "--tools", "", "--no-session-persistence"])
+        .args([
+            "-p",
+            "--tools",
+            "",
+            "--no-session-persistence",
+            // Skip Claude Code's large default prompt, user settings, MCP servers and skills: ~6k -> ~0.4k tokens.
+            "--system-prompt",
+            "You are a concise, precise coding interview coach.",
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+        ])
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -56,6 +119,7 @@ pub async fn review(p: &Problem, language: &str, code: &str, result: &serde_json
         .map_err(|e| format!("could not launch the `claude` CLI: {e}"))?;
     let mut stdin = child.stdin.take().unwrap();
     let input = prompt(p, language, code, result);
+    eprintln!("review prompt: {} chars (~{} tokens)", input.len(), input.len() / 4);
     tokio::spawn(async move {
         let _ = stdin.write_all(input.as_bytes()).await;
     });

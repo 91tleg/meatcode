@@ -26,6 +26,7 @@ pub struct TestResult {
 
 #[derive(Serialize, Default)]
 pub struct RunResult {
+    pub submission_id: Option<i64>,
     pub compile_error: Option<String>,
     pub results: Vec<TestResult>,
     pub passed: usize,

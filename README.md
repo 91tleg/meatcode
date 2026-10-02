@@ -6,9 +6,14 @@ Languages: Python, JavaScript, Rust, C++ (uses local `python3`, `node`, `rustc`,
     cargo run                         # API on :3000
     cd web && npm run dev             # UI on :5173
 
+## Storage
+SQLite (`meatcode.db`, gitignored, created on first run; override with `DATABASE_PATH`) holds your drafts,
+every submission (code + per-test results) and saved Claude reviews. Use the **History** dropdown to reopen
+an attempt along with its review. Problems stay as JSON files in `problems/`.
+
 ## Claude review
 After a Submit, click **Review with Claude** for a verdict, complexity, code review, missed edge cases and
-three follow-up questions. It runs the local `claude` CLI (needs Claude Code installed and logged in).
+three follow-up questions. Reviews are saved per submission (**Regenerate review** asks again). It runs the local `claude` CLI (needs Claude Code installed and logged in).
 
 ## Adding problems
 Drop a JSON file in `problems/` (picked up without restart). Users only write a function;

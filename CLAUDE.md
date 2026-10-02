@@ -1,7 +1,7 @@
 # meatcode
 
 Local coding interview practice app: Axum API in `src/`, React/Vite UI in `web/`, problems in `problems/*.json`
-(format documented in README.md). The review feature shells out to the local `claude -p` CLI (no API key).
+(format documented in README.md). User data (drafts, submissions, reviews) lives in SQLite via sqlx, schema in `src/db.rs`. The review feature shells out to the local `claude -p` CLI (no API key).
 
 ## Authoring a problem (when asked to add one)
 
