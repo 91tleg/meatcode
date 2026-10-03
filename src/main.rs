@@ -40,6 +40,7 @@ pub struct Problem {
 #[derive(Clone)]
 struct AppState {
     dir: Arc<PathBuf>,
+    sheets: Arc<PathBuf>,
     db: SqlitePool,
 }
 
@@ -74,15 +75,72 @@ struct Summary {
     slug: String,
     title: String,
     difficulty: String,
+    /// Some submission passed every test in the current suite.
+    solved: bool,
 }
 
-async fn list(State(s): State<AppState>) -> Json<Vec<Summary>> {
-    Json(
+async fn list(State(s): State<AppState>) -> Result<Json<Vec<Summary>>, StatusCode> {
+    let passed = db::fully_passed(&s.db).await.map_err(log_err)?;
+    Ok(Json(
         load_all(&s.dir)
             .into_iter()
-            .map(|p| Summary { slug: p.slug, title: p.title, difficulty: p.difficulty })
+            .map(|p| Summary {
+                solved: passed.contains(&(p.slug.clone(), p.tests.len() as i64)),
+                slug: p.slug,
+                title: p.title,
+                difficulty: p.difficulty,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Serialize)]
+struct SheetSummary {
+    slug: String,
+    title: String,
+}
+
+#[derive(Serialize)]
+struct Sheet {
+    slug: String,
+    title: String,
+    markdown: String,
+}
+
+/// The title is the first `# ` heading of the file.
+fn sheet_title(md: &str, fallback: &str) -> String {
+    md.lines().find_map(|l| l.strip_prefix("# ")).unwrap_or(fallback).trim().to_string()
+}
+
+// Cheatsheets are Markdown files in `cheatsheets/`, ordered by filename (e.g. `01-dynamic-programming.md`).
+async fn list_sheets(State(s): State<AppState>) -> Json<Vec<SheetSummary>> {
+    let mut files: Vec<_> = std::fs::read_dir(&*s.sheets)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    files.sort();
+    Json(
+        files
+            .iter()
+            .filter_map(|p| {
+                let slug = p.file_stem()?.to_str()?.to_string();
+                let md = std::fs::read_to_string(p).ok()?;
+                Some(SheetSummary { title: sheet_title(&md, &slug), slug })
+            })
             .collect(),
     )
+}
+
+async fn get_sheet(State(s): State<AppState>, Path(slug): Path<String>) -> Result<Json<Sheet>, StatusCode> {
+    // Only plain file names: no separators or dots, so a request can't escape the directory.
+    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let markdown = std::fs::read_to_string(s.sheets.join(format!("{slug}.md"))).map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok(Json(Sheet { title: sheet_title(&markdown, &slug), slug, markdown }))
 }
 
 #[derive(Serialize)]
@@ -112,19 +170,38 @@ struct RunReq {
     code: String,
     #[serde(default)]
     submit: bool,
+    /// Submitting a follow-up attempt: the id of the reviewed attempt it builds on.
+    parent_id: Option<i64>,
 }
 
-fn internal(e: impl std::fmt::Display) -> StatusCode {
+fn log_err(e: impl std::fmt::Display) -> StatusCode {
     eprintln!("error: {e}");
     StatusCode::INTERNAL_SERVER_ERROR
+}
+
+fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
+    (log_err(e), "internal error".into())
 }
 
 async fn run(
     State(s): State<AppState>,
     Path(slug): Path<String>,
     Json(req): Json<RunReq>,
-) -> Result<Json<runner::RunResult>, StatusCode> {
-    let p = find(&s.dir, &slug).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<runner::RunResult>, (StatusCode, String)> {
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
+    let p = find(&s.dir, &slug).ok_or((StatusCode::NOT_FOUND, "no such problem".into()))?;
+    // A follow-up must build on a reviewed first attempt of this problem; there is only one round.
+    let parent = match (req.submit, req.parent_id) {
+        (true, Some(id)) => {
+            let base = db::get_submission(&s.db, id).await.map_err(internal)?.ok_or_else(|| bad("no such parent attempt"))?;
+            let followup = base.proposed_followup.clone();
+            if base.slug != slug || base.parent_id.is_some() {
+                return Err(bad("a follow-up must build on a first attempt of the same problem"));
+            }
+            Some((id, followup.ok_or_else(|| bad("that attempt has no follow-up; review it first"))?))
+        }
+        _ => None,
+    };
     let tests: Vec<TestCase> = if req.submit {
         p.tests.clone()
     } else {
@@ -133,9 +210,18 @@ async fn run(
     let mut result = runner::run(&req.language, &req.code, &p, &tests).await;
     if req.submit {
         let json = serde_json::to_string(&result).map_err(internal)?;
-        let id = db::insert_submission(&s.db, &slug, &req.language, &req.code, result.passed, result.total, &json)
-            .await
-            .map_err(internal)?;
+        let id = db::insert_submission(
+            &s.db,
+            &slug,
+            &req.language,
+            &req.code,
+            result.passed,
+            result.total,
+            &json,
+            parent.as_ref().map(|(id, f)| (*id, f)),
+        )
+        .await
+        .map_err(internal)?;
         result.submission_id = Some(id);
     }
     Ok(Json(result))
@@ -145,14 +231,14 @@ async fn list_submissions(
     State(s): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<Json<Vec<db::SubmissionSummary>>, StatusCode> {
-    Ok(Json(db::list_submissions(&s.db, &slug).await.map_err(internal)?))
+    Ok(Json(db::list_submissions(&s.db, &slug).await.map_err(log_err)?))
 }
 
 async fn get_submission(
     State(s): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<db::Submission>, StatusCode> {
-    db::get_submission(&s.db, id).await.map_err(internal)?.map(Json).ok_or(StatusCode::NOT_FOUND)
+    db::get_submission(&s.db, id).await.map_err(log_err)?.map(Json).ok_or(StatusCode::NOT_FOUND)
 }
 
 #[derive(Deserialize)]
@@ -166,6 +252,7 @@ struct ReviewReq {
 #[derive(Serialize)]
 struct ReviewResp {
     review: String,
+    followup: Option<review::Followup>,
 }
 
 async fn review(
@@ -178,21 +265,35 @@ async fn review(
         .map_err(err)?
         .ok_or((StatusCode::NOT_FOUND, "no such submission".into()))?;
     if let (Some(saved), false) = (&sub.review, req.force) {
-        return Ok(Json(ReviewResp { review: saved.clone() }));
+        return Ok(Json(ReviewResp { review: saved.clone(), followup: sub.proposed_followup.clone() }));
     }
     let p = find(&s.dir, &sub.slug).ok_or((StatusCode::NOT_FOUND, "problem no longer exists".into()))?;
-    let text = review::review(&p, &sub.language, &sub.code, &sub.results)
+    // A follow-up attempt is reviewed against the attempt it was built from, and is the last round.
+    let base = match sub.parent_id {
+        Some(id) => Some(
+            db::get_submission(&s.db, id)
+                .await
+                .map_err(err)?
+                .ok_or((StatusCode::NOT_FOUND, "parent attempt is missing".into()))?,
+        ),
+        None => None,
+    };
+    let kind = match (&base, &sub.followup) {
+        (Some(b), Some(f)) => review::Kind::FollowUp { question: &f.question, base_code: &b.code },
+        _ => review::Kind::Initial,
+    };
+    let out = review::review(&p, &sub.language, &sub.code, &sub.results, kind)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
-    db::save_review(&s.db, sub.id, &text).await.map_err(err)?;
-    Ok(Json(ReviewResp { review: text }))
+    db::save_review(&s.db, sub.id, &out.markdown, out.followup.as_ref()).await.map_err(err)?;
+    Ok(Json(ReviewResp { review: out.markdown, followup: out.followup }))
 }
 
 async fn get_drafts(
     State(s): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<Json<HashMap<String, String>>, StatusCode> {
-    Ok(Json(db::get_drafts(&s.db, &slug).await.map_err(internal)?))
+    Ok(Json(db::get_drafts(&s.db, &slug).await.map_err(log_err)?))
 }
 
 #[derive(Deserialize)]
@@ -205,7 +306,7 @@ async fn put_draft(
     Path((slug, lang)): Path<(String, String)>,
     Json(req): Json<DraftReq>,
 ) -> Result<StatusCode, StatusCode> {
-    db::put_draft(&s.db, &slug, &lang, &req.code).await.map_err(internal)?;
+    db::put_draft(&s.db, &slug, &lang, &req.code).await.map_err(log_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -213,7 +314,7 @@ async fn delete_draft(
     State(s): State<AppState>,
     Path((slug, lang)): Path<(String, String)>,
 ) -> Result<StatusCode, StatusCode> {
-    db::delete_draft(&s.db, &slug, &lang).await.map_err(internal)?;
+    db::delete_draft(&s.db, &slug, &lang).await.map_err(log_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -222,10 +323,13 @@ async fn main() {
     let dir = std::env::var("PROBLEMS_DIR").unwrap_or_else(|_| "problems".into());
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "meatcode.db".into());
     let db = db::connect(&db_path).await.expect("could not open the SQLite database");
-    let state = AppState { dir: Arc::new(PathBuf::from(dir)), db };
+    let sheets = std::env::var("CHEATSHEETS_DIR").unwrap_or_else(|_| "cheatsheets".into());
+    let state = AppState { dir: Arc::new(PathBuf::from(dir)), sheets: Arc::new(PathBuf::from(sheets)), db };
     let app = Router::new()
         .route("/api/problems", get(list))
         .route("/api/problems/{slug}", get(get_problem))
+        .route("/api/cheatsheets", get(list_sheets))
+        .route("/api/cheatsheets/{slug}", get(get_sheet))
         .route("/api/problems/{slug}/run", post(run))
         .route("/api/problems/{slug}/submissions", get(list_submissions))
         .route("/api/problems/{slug}/drafts", get(get_drafts))
@@ -243,7 +347,8 @@ async fn main() {
                 .allow_headers([CONTENT_TYPE]),
         )
         .with_state(state);
-    let l = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
-    println!("meatcode API on http://127.0.0.1:3000");
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let l = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
+    println!("meatcode API on http://127.0.0.1:{port}");
     axum::serve(l, app).await.unwrap();
 }

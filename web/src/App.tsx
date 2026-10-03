@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import Editor from '@monaco-editor/react'
+import Editor, { DiffEditor } from '@monaco-editor/react'
 import Markdown from 'react-markdown'
+import ProblemPicker, { type Summary } from './ProblemPicker'
+import CheatSheet from './CheatSheet'
 
-type Summary = { slug: string; title: string; difficulty: string }
 type Test = { args: unknown[]; expected: unknown; hidden?: boolean }
 type Problem = Summary & {
   description: string
@@ -18,7 +19,13 @@ type RunResult = {
   compile_error: string | null; results: TestResult[]; passed: number; total: number
   submission_id?: number | null
 }
-type HistoryItem = { id: number; language: string; passed: number; total: number; created_at: number; has_review: boolean }
+type Followup = { question: string; hint: string }
+type HistoryItem = {
+  id: number; language: string; passed: number; total: number; created_at: number
+  has_review: boolean; parent_id: number | null
+}
+// A follow-up round: edit the first attempt in place to satisfy a new constraint.
+type ActiveFollowup = Followup & { parentId: number; baseCode: string }
 
 const ago = (unix: number) => {
   const d = Math.max(0, Date.now() / 1000 - unix)
@@ -52,6 +59,10 @@ export default function App() {
   const [mode, setMode] = useState<'run' | 'submit'>('run')
   const [submissionId, setSubmissionId] = useState<number | null>(null)
   const [history, setHistory] = useState<HistoryItem[]>([])
+  const [proposed, setProposed] = useState<Followup | null>(null)
+  const [active, setActive] = useState<ActiveFollowup | null>(null)
+  const [diff, setDiff] = useState(false)
+  const [sheetOpen, setSheetOpen] = useState(false)
   const [draftVersion, setDraftVersion] = useState(0)
   const drafts = useRef<Record<string, string>>({})
   const saveTimers = useRef<Record<string, number>>({})
@@ -59,11 +70,11 @@ export default function App() {
   const [reviewing, setReviewing] = useState(false)
   const [reviewErr, setReviewErr] = useState<string | null>(null)
 
+  const refreshList = () =>
+    fetch('/api/problems').then(r => r.json()).then((l: Summary[]) => { setList(l); return l }).catch(() => [] as Summary[])
+
   useEffect(() => {
-    fetch('/api/problems').then(r => r.json()).then((l: Summary[]) => {
-      setList(l)
-      if (l.length) setSlug(l[0].slug)
-    })
+    refreshList().then(l => { if (l.length) setSlug(l[0].slug) })
   }, [])
 
   const refreshHistory = (sl: string) =>
@@ -74,6 +85,7 @@ export default function App() {
     if (!slug) return
     let stale = false
     setResult(null); setSubmissionId(null); setReview(null); setReviewErr(null); setHistory([])
+    setProposed(null); setActive(null); setDiff(false)
     Promise.all([
       fetch(`/api/problems/${slug}`).then(r => r.json()),
       fetch(`/api/problems/${slug}/drafts`).then(r => r.json()).catch(() => ({})),
@@ -120,26 +132,44 @@ export default function App() {
     if (!problem) return
     const s = await fetch(`/api/submissions/${id}`).then(r => r.json())
     saveDraft(problem.slug, s.language, s.code)
-    setLang(s.language); setCode(s.code)
+    setLang(s.language); setCode(s.code); setDiff(false)
     setMode('submit'); setResult(s.results); setSubmissionId(s.id)
-    setReview(s.review); setReviewErr(null)
+    setReview(s.review); setReviewErr(null); setProposed(s.proposed_followup)
+    if (s.parent_id && s.followup) {
+      const base = await fetch(`/api/submissions/${s.parent_id}`).then(r => r.json())
+      setActive({ ...s.followup, parentId: s.parent_id, baseCode: base.code })
+    } else setActive(null)
   }
+
+  // Start the follow-up round: reload the reviewed solution so it can be edited in place.
+  const startFollowup = async () => {
+    if (!problem || !proposed || !submissionId) return
+    const base = await fetch(`/api/submissions/${submissionId}`).then(r => r.json())
+    saveDraft(problem.slug, base.language, base.code)
+    setLang(base.language); setCode(base.code)
+    setActive({ ...proposed, parentId: base.id, baseCode: base.code })
+    setProposed(null); setResult(null); setReview(null); setReviewErr(null)
+    setSubmissionId(null); setMode('run'); setDiff(false)
+  }
+
+  const cancelFollowup = () => { setActive(null); setDiff(false); setResult(null); setSubmissionId(null); setReview(null) }
 
   const run = async (submit: boolean) => {
     if (!problem) return
     setBusy(true); setMode(submit ? 'submit' : 'run'); setResult(null)
-    setReview(null); setReviewErr(null); setSubmissionId(null)
+    setReview(null); setReviewErr(null); setSubmissionId(null); setProposed(null)
     try {
       const r = await fetch(`/api/problems/${problem.slug}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ language: lang, code, submit }),
+        body: JSON.stringify({ language: lang, code, submit, parent_id: submit ? active?.parentId : undefined }),
       })
       const res: RunResult = await r.json()
       setResult(res)
       if (submit && res.submission_id) {
         setSubmissionId(res.submission_id)
         refreshHistory(problem.slug)
+        if (res.passed === res.total) refreshList() // may have just been solved
       }
     } finally { setBusy(false) }
   }
@@ -171,8 +201,10 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ submission_id: submissionId, force }),
       })
-      if (r.ok) { setReview((await r.json()).review); refreshHistory(problem.slug) }
-      else setReviewErr(await r.text())
+      if (r.ok) {
+        const out = await r.json()
+        setReview(out.review); setProposed(out.followup ?? null); refreshHistory(problem.slug)
+      } else setReviewErr(await r.text())
     } catch (e) { setReviewErr(String(e)) }
     finally { setReviewing(false) }
   }
@@ -181,10 +213,9 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <h1>meatcode</h1>
-        <select className="picker" value={slug ?? ''} onChange={e => setSlug(e.target.value)}>
-          {list.length === 0 && <option value="">No problems yet</option>}
-          {list.map(p => <option key={p.slug} value={p.slug}>{p.title} · {p.difficulty}</option>)}
-        </select>
+        <ProblemPicker list={list} value={slug} onChange={setSlug} />
+        <span className="spacer" />
+        <button onClick={() => setSheetOpen(o => !o)} className={sheetOpen ? 'primary' : ''}>Cheatsheet</button>
       </header>
       <main className="main">
 
@@ -212,7 +243,7 @@ export default function App() {
                 <option value="">History ({history.length})</option>
                 {history.map(h => (
                   <option key={h.id} value={h.id}>
-                    {h.passed === h.total ? '✓' : '✗'} {h.passed}/{h.total} · {LANGS.find(l => l.id === h.language)?.label ?? h.language} · {ago(h.created_at)}{h.has_review ? ' · reviewed' : ''}
+                    {h.parent_id ? '↳ follow-up ' : ''}{h.passed === h.total ? '✓' : '✗'} {h.passed}/{h.total} · {LANGS.find(l => l.id === h.language)?.label ?? h.language} · {ago(h.created_at)}{h.has_review ? ' · reviewed' : ''}
                   </option>
                 ))}
               </select>
@@ -220,12 +251,30 @@ export default function App() {
               <button disabled={busy} onClick={() => run(false)}>Run</button>
               <button disabled={busy} onClick={() => run(true)} className="primary">Submit</button>
             </div>
+            {active && (
+              <div className="banner">
+                <div><b>Follow-up:</b> {active.question}</div>
+                <details><summary>Hint</summary>{active.hint}</details>
+                <div className="banner-actions">
+                  <button className="ghost" onClick={() => setDiff(d => !d)}>{diff ? 'Back to editing' : 'Compare with first attempt'}</button>
+                  <button className="ghost" onClick={cancelFollowup}>Cancel follow-up</button>
+                </div>
+              </div>
+            )}
             <div className="editor">
-            <Editor
-              height="100%" theme="vs-dark" value={code} onChange={onCode}
-              language={LANGS.find(l => l.id === lang)?.monaco}
-              options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true }}
-            />
+              {active && diff ? (
+                <DiffEditor
+                  height="100%" theme="vs-dark" original={active.baseCode} modified={code}
+                  language={LANGS.find(l => l.id === lang)?.monaco}
+                  options={{ readOnly: true, minimap: { enabled: false }, fontSize: 14, automaticLayout: true, renderSideBySide: true }}
+                />
+              ) : (
+                <Editor
+                  height="100%" theme="vs-dark" value={code} onChange={onCode}
+                  language={LANGS.find(l => l.id === lang)?.monaco}
+                  options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true }}
+                />
+              )}
             </div>
             <div className="divider" onPointerDown={startDrag} title="Drag to resize" />
             <div className="results" style={{ height: outH }}>
@@ -234,7 +283,7 @@ export default function App() {
               {result && !result.compile_error && (
                 <>
                   <p className={result.passed === result.total ? 'ok' : 'bad'}>
-                    {mode === 'submit' ? 'Submit' : 'Run'}: {result.passed}/{result.total} passed
+                    {mode === 'submit' ? (active ? 'Follow-up submit' : 'Submit') : 'Run'}: {result.passed}/{result.total} passed
                   </p>
                   {result.results.map((r, i) => (
                     <details key={i} open={!r.passed} className={r.passed ? 'pass' : 'fail'}>
@@ -253,10 +302,18 @@ export default function App() {
               {result && !busy && mode === 'submit' && submissionId && (
                 <div className="review">
                   <button onClick={() => askReview(!!review)} disabled={reviewing}>
-                    {reviewing ? 'Claude is reviewing…' : review ? 'Regenerate review' : 'Review with Claude'}
+                    {reviewing ? 'Claude is reviewing…' : review ? 'Regenerate review' : active ? 'Review follow-up' : 'Review with Claude'}
                   </button>
                   {reviewErr && <pre className="err">{reviewErr}</pre>}
                   {review && <div className="md"><Markdown>{review}</Markdown></div>}
+                  {review && proposed && !active && (
+                    <div className="followup-card">
+                      <b>Follow-up</b>
+                      <p>{proposed.question}</p>
+                      <details><summary>Hint</summary>{proposed.hint}</details>
+                      <button className="primary" onClick={startFollowup}>Work on this follow-up</button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -264,6 +321,7 @@ export default function App() {
         </>
       ) : <div className="empty muted">No problems yet. Add JSON files to <code>problems/</code>.</div>}
       </main>
+      {sheetOpen && <CheatSheet onClose={() => setSheetOpen(false)} />}
     </div>
   )
 }

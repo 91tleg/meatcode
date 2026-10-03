@@ -1,4 +1,5 @@
 use crate::Problem;
+use serde::{Deserialize, Serialize};
 use std::{process::Stdio, time::Duration};
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
@@ -54,62 +55,133 @@ fn summarize(result: &serde_json::Value) -> String {
     out
 }
 
-fn prompt(p: &Problem, language: &str, code: &str, result: &serde_json::Value) -> String {
-    let sig = serde_json::to_string(&p.function).unwrap_or_default();
-    format!(
-        r#"You are a senior engineer coaching someone who is practicing coding interview problems.
-They just submitted a solution. Review it and reply in Markdown with exactly these sections:
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Followup {
+    pub question: String,
+    pub hint: String,
+}
 
+pub struct ReviewOut {
+    pub markdown: String,
+    /// Only the first review of a problem proposes a follow-up; the follow-up review is the last round.
+    pub followup: Option<Followup>,
+}
+
+pub enum Kind<'a> {
+    Initial,
+    /// A second attempt that edits `base_code` to satisfy `question`.
+    FollowUp { question: &'a str, base_code: &'a str },
+}
+
+const SCHEMA: &str = r#"{"type":"object","properties":{"review":{"type":"string"},"followup":{"type":"object","properties":{"question":{"type":"string"},"hint":{"type":"string"}},"required":["question","hint"]}},"required":["review","followup"]}"#;
+
+fn problem_block(p: &Problem) -> String {
+    format!(
+        "# Problem: {} ({})\n{}\n\nFunction signature (JSON): {}\n",
+        p.title,
+        p.difficulty,
+        p.description,
+        serde_json::to_string(&p.function).unwrap_or_default()
+    )
+}
+
+fn prompt(p: &Problem, language: &str, code: &str, result: &serde_json::Value, kind: &Kind) -> String {
+    let problem = problem_block(p);
+    let results = summarize(result);
+    match kind {
+        Kind::Initial => format!(
+            r#"You are a senior engineer coaching someone who is practicing coding interview problems.
+They just submitted a solution. Return JSON with two fields.
+
+`review`: Markdown with exactly these sections:
 ## Verdict
 One or two sentences: correct or not, and why. If tests failed, explain the actual bug (use the failing input/expected/actual below), not just the symptom.
-
 ## Complexity
 Time and space of their solution, and whether a better bound exists.
-
 ## Code review
 Concrete feedback on clarity, idioms for {language}, naming, and anything a reviewer would flag. Keep it short; skip praise filler.
-
 ## Edge cases
 Edge cases their code mishandles or that the test suite may not cover (if any).
 
-## Follow-ups
-Three follow-up questions an interviewer might ask next, from easier to harder (e.g. changed constraints, streaming input, a variant, scaling). Give a one-line hint for each, no full solutions.
+`followup`: the ONE follow-up an interviewer would ask next, with a one-line `hint` (no full solution). Rules:
+- Same function signature and same input/output format: the person will edit their code in place and the existing tests must still pass.
+- It adds a new constraint on technique, time or space that can be judged by reading the code (e.g. O(1) extra space, a single pass, no sorting, no hash map, iterative instead of recursive).
+- A correct solution under the constraint must exist, run within the 5s per-test limit on the largest tests, and pass every existing test. If unsure, pick a weaker constraint.
+- Choose what is most worth practicing given THEIR solution. If it already meets the obvious optimum, pick a constraint that forces a different technique.
 
-# Problem: {title} ({difficulty})
-{description}
-
-Function signature (JSON): {sig}
-
+{problem}
 # Submission ({language})
 ```
 {code}
 ```
 
 # Test results
-{result}
-"#,
-        title = p.title,
-        difficulty = p.difficulty,
-        description = p.description,
-        result = summarize(result),
-    )
+{results}
+"#
+        ),
+        Kind::FollowUp { question, base_code } => format!(
+            r#"You are a senior engineer coaching someone who is practicing coding interview problems.
+They solved the problem, then you asked this follow-up, and they edited their code in place to answer it.
+
+Follow-up: {question}
+
+Review the new attempt in Markdown with exactly these sections:
+## Verdict
+Did they answer the follow-up? Say whether the tests pass and whether the constraint is actually met. If tests failed, explain the real bug.
+## Constraint check
+Judge from the code whether the constraint holds (cite the relevant lines or variables). State the new time and space complexity.
+## What changed
+How the new version differs from the first, and the tradeoff they accepted.
+## Takeaway
+One sentence on how to explain this in an interview.
+
+This is the last round for this problem: do not propose another follow-up.
+
+{problem}
+# First attempt ({language})
+```
+{base_code}
+```
+
+# New attempt ({language})
+```
+{code}
+```
+
+# Test results for the new attempt
+{results}
+"#
+        ),
+    }
 }
 
-pub async fn review(p: &Problem, language: &str, code: &str, result: &serde_json::Value) -> Result<String, String> {
+pub async fn review(
+    p: &Problem,
+    language: &str,
+    code: &str,
+    result: &serde_json::Value,
+    kind: Kind<'_>,
+) -> Result<ReviewOut, String> {
+    let mut args: Vec<&str> = vec![
+        "-p",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        // Skip Claude Code's large default prompt, user settings, MCP servers and skills: ~6k -> ~0.4k tokens.
+        "--system-prompt",
+        "You are a concise, precise coding interview coach.",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--output-format",
+        "json",
+    ];
+    if matches!(kind, Kind::Initial) {
+        args.extend(["--json-schema", SCHEMA]);
+    }
     let mut child = Command::new("claude")
-        .args([
-            "-p",
-            "--tools",
-            "",
-            "--no-session-persistence",
-            // Skip Claude Code's large default prompt, user settings, MCP servers and skills: ~6k -> ~0.4k tokens.
-            "--system-prompt",
-            "You are a concise, precise coding interview coach.",
-            "--setting-sources",
-            "",
-            "--strict-mcp-config",
-            "--disable-slash-commands",
-        ])
+        .args(&args)
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -118,7 +190,7 @@ pub async fn review(p: &Problem, language: &str, code: &str, result: &serde_json
         .spawn()
         .map_err(|e| format!("could not launch the `claude` CLI: {e}"))?;
     let mut stdin = child.stdin.take().unwrap();
-    let input = prompt(p, language, code, result);
+    let input = prompt(p, language, code, result, &kind);
     eprintln!("review prompt: {} chars (~{} tokens)", input.len(), input.len() / 4);
     tokio::spawn(async move {
         let _ = stdin.write_all(input.as_bytes()).await;
@@ -127,9 +199,20 @@ pub async fn review(p: &Problem, language: &str, code: &str, result: &serde_json
         .await
         .map_err(|_| "review timed out".to_string())?
         .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(format!("claude exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr)))
+    if !out.status.success() {
+        return Err(format!("claude exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr)));
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("bad claude output: {e}"))?;
+    if v["is_error"] == true {
+        return Err(format!("claude error: {}", v["result"].as_str().unwrap_or("unknown")));
+    }
+    match kind {
+        Kind::FollowUp { .. } => Ok(ReviewOut { markdown: v["result"].as_str().unwrap_or("").trim().to_string(), followup: None }),
+        Kind::Initial => {
+            let so = &v["structured_output"];
+            let markdown = so["review"].as_str().ok_or("claude returned no review")?.trim().to_string();
+            let followup = serde_json::from_value(so["followup"].clone()).ok();
+            Ok(ReviewOut { markdown, followup })
+        }
     }
 }

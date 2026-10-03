@@ -25,3 +25,7 @@ Never hand-write expected outputs. Generate them with a script and verify every 
 6. Mutation-test the suite: run 4-6 plausible buggy solutions through `POST /api/problems/<slug>/run`
    (`"submit": true`); every one must fail at least one test. Then run a correct solution in all four languages.
 7. Strings must be ASCII with no newlines; `int` is 64-bit; floats compare with 1e-6 tolerance.
+
+## Cheatsheets
+Concept guides live in `cheatsheets/*.md` (served read-only by the API). When writing or editing one, run every
+Python snippet against a brute force before saving; a wrong example is worse than none.
