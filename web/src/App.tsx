@@ -8,7 +8,8 @@ type Test = { args: unknown[]; expected: unknown; hidden?: boolean }
 type Problem = Summary & {
   description: string
   starter: Record<string, string>
-  function: { params: { name: string; type: string }[] }
+  function?: { params: { name: string; type: string }[] } | null
+  sql?: { schema: string; starter: string; ordered?: boolean } | null
   tests: Test[]
 }
 type TestResult = {
@@ -37,7 +38,15 @@ const ago = (unix: number) => {
 const put = (url: string, body: unknown) =>
   fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {})
 
+// Expected output of a SQL test: {columns, rows} as a plain-text table.
+const tableText = (e: unknown) => {
+  const t = e as { columns?: string[]; rows?: unknown[][] }
+  const cell = (v: unknown) => (v === null ? 'NULL' : String(v))
+  return [(t.columns ?? []).join(' | '), ...(t.rows ?? []).map(r => r.map(cell).join(' | '))].join('\n')
+}
+
 const LANGS = [
+  { id: 'sql', label: 'SQL', monaco: 'sql' },
   { id: 'python', label: 'Python', monaco: 'python' },
   { id: 'javascript', label: 'JavaScript', monaco: 'javascript' },
   { id: 'rust', label: 'Rust', monaco: 'rust' },
@@ -48,7 +57,10 @@ export default function App() {
   const [list, setList] = useState<Summary[]>([])
   const [slug, setSlug] = useState<string | null>(null)
   const [problem, setProblem] = useState<Problem | null>(null)
-  const [lang, setLang] = useState(localStorage.getItem('lang') || 'python')
+  const [codeLang, setCodeLang] = useState(localStorage.getItem('lang') || 'python')
+  // SQL problems have a single language; code problems use the one chosen in the toolbar.
+  const lang = problem?.sql ? 'sql' : codeLang
+  const setLang = (l: string) => { if (l !== 'sql') setCodeLang(l) }
   const [code, setCode] = useState('')
   const [result, setResult] = useState<RunResult | null>(null)
   const [busy, setBusy] = useState(false)
@@ -224,21 +236,59 @@ export default function App() {
           <section className="desc">
             <h2>{problem.title} <span className={'diff ' + problem.difficulty.toLowerCase()}>{problem.difficulty}</span></h2>
             <div className="prose">{problem.description}</div>
+            {problem.sql && (
+              <>
+                <h3>Tables</h3>
+                <pre>{problem.sql.schema}</pre>
+              </>
+            )}
+            {active && (
+              <div className="followup-active">
+                <div className="followup-top">
+                  <b>Follow-up</b>
+                  <button className="ghost" onClick={cancelFollowup}>Cancel</button>
+                </div>
+                <p>{active.question}</p>
+                <details><summary>Hint</summary>{active.hint}</details>
+                <p className="muted">Edit your solution in place, then Submit and review it.</p>
+              </div>
+            )}
             {problem.tests.map((t, i) => (
               <div key={i} className="example">
                 <b>Example {i + 1}</b>
-                <pre>Input:{'\n'}{problem.function.params.map((p, j) => `${p.name} = ${JSON.stringify(t.args[j])}`).join('\n')}</pre>
-                <pre>Output:{'\n'}{JSON.stringify(t.expected)}</pre>
+                {problem.sql ? (
+                  <>
+                    <pre>Data:{'\n'}{String(t.args[0])}</pre>
+                    <pre>Expected output:{'\n'}{tableText(t.expected)}</pre>
+                  </>
+                ) : (
+                  <>
+                    <pre>Input:{'\n'}{(problem.function?.params ?? []).map((p, j) => `${p.name} = ${JSON.stringify(t.args[j])}`).join('\n')}</pre>
+                    <pre>Output:{'\n'}{JSON.stringify(t.expected)}</pre>
+                  </>
+                )}
               </div>
             ))}
           </section>
 
           <section className="work" ref={workRef}>
             <div className="toolbar">
-              <select value={lang} onChange={e => { setLang(e.target.value); localStorage.setItem('lang', e.target.value) }}>
-                {LANGS.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
-              </select>
+              {problem.sql ? (
+                <span className="lang-tag">SQL</span>
+              ) : (
+                <select value={lang} onChange={e => { setLang(e.target.value); localStorage.setItem('lang', e.target.value) }}>
+                  {LANGS.filter(l => l.id !== 'sql').map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
+                </select>
+              )}
               <button onClick={reset} className="ghost">Reset</button>
+              {active && (
+                <button
+                  onClick={() => setDiff(d => !d)} className={diff ? 'primary' : 'ghost'}
+                  title={diff ? 'Back to editing' : 'Compare with your first attempt'}
+                >
+                  {diff ? 'Edit' : 'Compare'}
+                </button>
+              )}
               <select value="" onChange={e => e.target.value && openAttempt(Number(e.target.value))} disabled={history.length === 0}>
                 <option value="">History ({history.length})</option>
                 {history.map(h => (
@@ -251,16 +301,6 @@ export default function App() {
               <button disabled={busy} onClick={() => run(false)}>Run</button>
               <button disabled={busy} onClick={() => run(true)} className="primary">Submit</button>
             </div>
-            {active && (
-              <div className="banner">
-                <div><b>Follow-up:</b> {active.question}</div>
-                <details><summary>Hint</summary>{active.hint}</details>
-                <div className="banner-actions">
-                  <button className="ghost" onClick={() => setDiff(d => !d)}>{diff ? 'Back to editing' : 'Compare with first attempt'}</button>
-                  <button className="ghost" onClick={cancelFollowup}>Cancel follow-up</button>
-                </div>
-              </div>
-            )}
             <div className="editor">
               {active && diff ? (
                 <DiffEditor
@@ -291,7 +331,7 @@ export default function App() {
                         {r.passed ? '✓' : '✗'} {r.hidden ? 'Hidden test' : 'Test'} {i + 1}
                         {!r.passed && ` — ${r.status}`} <span className="muted">{r.ms}ms</span>
                       </summary>
-                      {!r.hidden && <pre>Input:{'\n'}{r.input}</pre>}
+                      {!r.hidden && <pre>{problem?.sql ? 'Data' : 'Input'}:{'\n'}{r.input}</pre>}
                       {!r.hidden && <pre>Expected:{'\n'}{r.expected}</pre>}
                       {!r.passed && <pre>Actual:{'\n'}{r.actual}</pre>}
                       {r.stderr && <pre className="err">{r.stderr}</pre>}

@@ -34,10 +34,6 @@ details { margin: 4px 0; } summary { cursor: pointer; } .pass summary { color: #
 .divider::after { content: ''; position: absolute; left: 50%; top: 2px; width: 36px; height: 3px; margin-left: -18px; border-radius: 2px; background: var(--muted); }
 .divider:hover, .divider:active { background: #2d3340; }
 
-.banner { flex: none; padding: 8px 12px; background: #2a2433; border-bottom: 1px solid var(--line); font-size: 13px; }
-.banner details { margin-top: 2px; color: var(--muted); }
-.banner-actions { display: flex; gap: 8px; margin-top: 6px; }
-.banner-actions button { padding: 2px 10px; font-size: 12px; }
 .followup-card { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: #2a2433; }
 .followup-card p { margin: 4px 0; } .followup-card details { color: var(--muted); margin-bottom: 8px; }
 
@@ -67,3 +63,12 @@ details { margin: 4px 0; } summary { cursor: pointer; } .pass summary { color: #
 .sheet-body th, .sheet-body td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
 .sheet-body th { background: var(--panel); }
 .sheet-body pre { margin: 10px 0; }
+
+.followup-active { margin-top: 16px; padding: 10px 14px; border: 1px solid var(--accent); border-radius: 8px; background: #2a2433; }
+.followup-top { display: flex; justify-content: space-between; align-items: center; color: var(--accent); }
+.followup-top button { padding: 1px 10px; font-size: 12px; }
+.followup-active p { margin: 6px 0; } .followup-active details { color: var(--muted); }
+
+.toolbar button, .toolbar select { white-space: nowrap; flex: none; }
+
+.lang-tag { padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: #2d3340; font-size: 13px; }

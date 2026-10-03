@@ -76,17 +76,25 @@ pub enum Kind<'a> {
 const SCHEMA: &str = r#"{"type":"object","properties":{"review":{"type":"string"},"followup":{"type":"object","properties":{"question":{"type":"string"},"hint":{"type":"string"}},"required":["question","hint"]}},"required":["review","followup"]}"#;
 
 fn problem_block(p: &Problem) -> String {
-    format!(
-        "# Problem: {} ({})\n{}\n\nFunction signature (JSON): {}\n",
-        p.title,
-        p.difficulty,
-        p.description,
-        serde_json::to_string(&p.function).unwrap_or_default()
-    )
+    let spec = match (&p.sql, &p.function) {
+        (Some(q), _) => format!("This is a SQL problem (SQLite dialect). Tables:\n{}", q.schema),
+        (None, f) => format!("Function signature (JSON): {}", serde_json::to_string(f).unwrap_or_default()),
+    };
+    format!("# Problem: {} ({})\n{}\n\n{}\n", p.title, p.difficulty, p.description, spec)
+}
+
+/// What a valid follow-up may ask for. Code problems keep their signature; SQL problems keep their tables and columns.
+fn followup_rules(p: &Problem) -> &'static str {
+    if p.sql.is_some() {
+        "- Same tables and the same output columns: the person will edit their query in place and the existing tests must still pass.\n- It adds a new constraint on technique that can be judged by reading the query (e.g. no subqueries, a window function instead of a self-join, no DISTINCT, a single pass over one table).\n- A correct query under the constraint must exist in portable SQL (SQLite). If unsure, pick a weaker constraint.\n- Choose what is most worth practicing given THEIR query. If it already uses the obvious best technique, pick a constraint that forces a different one."
+    } else {
+        "- Same function signature and same input/output format: the person will edit their code in place and the existing tests must still pass.\n- It adds a new constraint on technique, time or space that can be judged by reading the code (e.g. O(1) extra space, a single pass, no sorting, no hash map, iterative instead of recursive).\n- A correct solution under the constraint must exist, run within the 5s per-test limit on the largest tests, and pass every existing test. If unsure, pick a weaker constraint.\n- Choose what is most worth practicing given THEIR solution. If it already meets the obvious optimum, pick a constraint that forces a different technique."
+    }
 }
 
 fn prompt(p: &Problem, language: &str, code: &str, result: &serde_json::Value, kind: &Kind) -> String {
     let problem = problem_block(p);
+    let rules = followup_rules(p);
     let results = summarize(result);
     match kind {
         Kind::Initial => format!(
@@ -104,10 +112,7 @@ Concrete feedback on clarity, idioms for {language}, naming, and anything a revi
 Edge cases their code mishandles or that the test suite may not cover (if any).
 
 `followup`: the ONE follow-up an interviewer would ask next, with a one-line `hint` (no full solution). Rules:
-- Same function signature and same input/output format: the person will edit their code in place and the existing tests must still pass.
-- It adds a new constraint on technique, time or space that can be judged by reading the code (e.g. O(1) extra space, a single pass, no sorting, no hash map, iterative instead of recursive).
-- A correct solution under the constraint must exist, run within the 5s per-test limit on the largest tests, and pass every existing test. If unsure, pick a weaker constraint.
-- Choose what is most worth practicing given THEIR solution. If it already meets the obvious optimum, pick a constraint that forces a different technique.
+{rules}
 
 {problem}
 # Submission ({language})

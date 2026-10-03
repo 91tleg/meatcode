@@ -2,6 +2,7 @@ mod db;
 mod harness;
 mod review;
 mod runner;
+mod sql;
 mod types;
 
 use axum::{
@@ -25,12 +26,25 @@ pub struct TestCase {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct SqlSpec {
+    /// CREATE TABLE statements shared by every test; each test's `args[0]` holds that test's INSERTs.
+    pub schema: String,
+    /// What the editor starts with.
+    pub starter: String,
+    /// Compare rows in order (the problem requires an ORDER BY) instead of as a set.
+    #[serde(default)]
+    pub ordered: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Problem {
     pub slug: String,
     pub title: String,
     pub difficulty: String,
     pub description: String,
-    pub function: types::Signature,
+    /// Code problems define a function signature; SQL problems define `sql` instead.
+    pub function: Option<types::Signature>,
+    pub sql: Option<SqlSpec>,
     /// Compare the returned array ignoring element order.
     #[serde(default)]
     pub sort_result: bool,
@@ -157,10 +171,14 @@ async fn get_problem(
     let mut p = find(&s.dir, &slug).ok_or(StatusCode::NOT_FOUND)?;
     // Never send hidden tests to the browser.
     p.tests.retain(|t| !t.hidden);
-    let starter = harness::starters(&p.function).map_err(|e| {
-        eprintln!("{slug}: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let starter = match (&p.sql, &p.function) {
+        (Some(q), _) => HashMap::from([("sql".to_string(), q.starter.clone())]),
+        (None, Some(f)) => harness::starters(f).map_err(|e| {
+            eprintln!("{slug}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?,
+        (None, None) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
     Ok(Json(ProblemView { problem: p, starter }))
 }
 

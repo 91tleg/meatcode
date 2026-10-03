@@ -29,3 +29,11 @@ Never hand-write expected outputs. Generate them with a script and verify every 
 ## Cheatsheets
 Concept guides live in `cheatsheets/*.md` (served read-only by the API). When writing or editing one, run every
 Python snippet against a brute force before saving; a wrong example is worse than none.
+
+## SQL problems
+Same rules as above, adapted: the expected rows must come from a plain-Python implementation of the question AND
+match a reference query run in real SQLite (two independent methods). Give each test its own small dataset and cover
+empty tables, NULLs (the `NOT IN` trap), duplicate names (group by id, not name), ties (ROW_NUMBER vs RANK vs
+DENSE_RANK) and one larger dataset. Avoid features that differ across SQL dialects (NULL ordering, date functions).
+Mutation-test with wrong queries, and check that INSERT, ATTACH, PRAGMA, multiple statements and runaway recursive
+CTEs are refused or time out.

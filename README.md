@@ -35,3 +35,11 @@ the server generates the starter code and a hidden `main` per language. See `pro
 - types: `int` (64-bit), `float`, `bool`, `string`, `int[]`, `float[]`, `string[]`, `int[][]`
 - `tests`: `args` (JSON, one per param) and `expected` (JSON); `"hidden": true` runs only on Submit
 - `"sort_result": true` accepts the returned array in any order
+
+### SQL problems
+Add a `sql` section instead of `function`: `{"schema": "CREATE TABLE ...", "starter": "...", "ordered": true}`.
+Each test's `args` is `[setup]` (the INSERT statements for that test) and `expected` is
+`{"columns": [...], "rows": [[...], ...]}`. Rows are compared as a set unless `ordered` is true (use it when the
+statement requires an `ORDER BY`). A submission is one `SELECT` run in a fresh in-memory SQLite database inside a
+`python3` subprocess; writes, `PRAGMA`, `ATTACH` and extensions are blocked, a query gets 3 seconds, and a
+submission gets a 10 second budget. Keep to portable SQL and avoid NULL ordering and date functions.

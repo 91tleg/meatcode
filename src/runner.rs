@@ -78,7 +78,9 @@ async fn run_one(argv: &[String], p: &Problem, ret: types::Ty, t: &TestCase, std
         hidden: t.hidden,
         input: p
             .function
-            .params
+            .as_ref()
+            .map(|f| f.params.clone())
+            .unwrap_or_default()
             .iter()
             .zip(&t.args)
             .map(|(pm, a)| format!("{} = {a}", pm.name))
@@ -145,13 +147,62 @@ async fn run_one(argv: &[String], p: &Problem, ret: types::Ty, t: &TestCase, std
     res
 }
 
+/// Keep results small: stress-test inputs can be hundreds of KB, and they are stored per submission.
+/// Passed tests only need a verdict, only the first few failures keep details, and the rest is clipped
+/// with a note of the original length.
+fn shrink(out: &mut RunResult) {
+    const KEEP: usize = 500;
+    fn clip(s: &mut String, max: usize) {
+        let n = s.chars().count();
+        if n > max {
+            let head: String = s.chars().take(max).collect();
+            *s = format!("{head}… [{n} chars total]");
+        }
+    }
+    if let Some(e) = &mut out.compile_error {
+        clip(e, 4000);
+    }
+    const DETAILED_FAILURES: usize = 5; // only the first few failures keep their details
+    let mut failures = 0;
+    for r in &mut out.results {
+        if !r.passed {
+            failures += 1;
+            if failures > DETAILED_FAILURES {
+                r.input.clear();
+                r.expected.clear();
+                r.actual.clear();
+                r.stderr.clear();
+            }
+        }
+        if r.passed {
+            r.actual.clear(); // equals `expected`, and the UI only shows `actual` for failures
+            if r.hidden {
+                r.input.clear();
+                r.expected.clear();
+            }
+        }
+        clip(&mut r.input, KEEP);
+        clip(&mut r.expected, KEEP);
+        clip(&mut r.actual, KEEP);
+        clip(&mut r.stderr, 1000);
+    }
+}
+
 pub async fn run(lang: &str, code: &str, p: &Problem, tests: &[TestCase]) -> RunResult {
+    if p.sql.is_some() {
+        let mut out = crate::sql::run(p, code, tests).await;
+        shrink(&mut out);
+        return out;
+    }
+    let Some(sig) = p.function.as_ref() else {
+        return RunResult { compile_error: Some("this problem has neither a function nor a sql section".into()), ..Default::default() };
+    };
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir: PathBuf = std::env::temp_dir().join(format!("meatcode-{}-{id}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let mut out = RunResult { total: tests.len(), ..Default::default() };
     let setup = (|| {
-        let (ptys, ret) = p.function.types()?;
+        let (ptys, ret) = sig.types()?;
         let mut inputs = Vec::new();
         for t in tests {
             if t.args.len() != ptys.len() {
@@ -163,7 +214,7 @@ pub async fn run(lang: &str, code: &str, p: &Problem, tests: &[TestCase]) -> Run
             }
             inputs.push(s);
         }
-        Ok::<_, String>((harness::wrap(lang, &p.function, code)?, ret, inputs))
+        Ok::<_, String>((harness::wrap(lang, sig, code)?, ret, inputs))
     })();
     let prepared = match setup {
         Ok((src, ret, inputs)) => prepare(lang, &src, &dir).await.map(|argv| (argv, ret, inputs)),
@@ -182,5 +233,6 @@ pub async fn run(lang: &str, code: &str, p: &Problem, tests: &[TestCase]) -> Run
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+    shrink(&mut out);
     out
 }
