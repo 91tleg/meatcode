@@ -43,6 +43,22 @@ the caller provides, and the function returns how many items it wrote (an out-of
 
 Buffers hold 1,048,576 elements (262,144 rows). The starter code shows the exact signature for each problem.
 
+## Problems from a job description
+Each job description is its own scope. Click **+ Job description**, paste text or upload a `.txt`/`.md` file (80-20,000
+characters), optionally name it, and pick a difficulty and an optional practice focus. The scope dropdown in the top bar then
+shows only that role's problems (or **All problems** / **Built-in**). **+ Problem** adds another one for the same role; Claude is
+told the titles it already has and picks a different skill. **Delete JD** removes the description and its problems.
+
+Claude writes the problem, a reference solution, an independent brute force and 12-16 test inputs. It never supplies expected
+outputs: both solutions are run locally on every input and the problem is only saved if they agree (one retry with the
+disagreement shown to Claude). Their outputs become the expected values; the first 3 tests are visible.
+
+Stored in `custom-problems/<id>/` (`jd.json` plus one file per problem; gitignored, override with `CUSTOM_PROBLEMS_DIR`).
+The generated solutions run on your machine, so they are rejected unless they only import `collections`, `heapq`, `bisect`,
+`itertools`, `math`, `functools` or `string` and avoid `open`/`exec`/`eval`/dunder names. This is a guard, not a sandbox.
+Limits: code problems only (no SQL), small inputs only (the brute force must finish), no large performance test, and the
+suite is not mutation-tested.
+
 ## Adding problems
 Drop a JSON file in `problems/` (picked up without restart). Users only write a function;
 the server generates the starter code and a hidden `main` per language. See `problems/two-sum.json`.

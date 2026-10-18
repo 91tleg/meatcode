@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 
-export type Summary = { slug: string; title: string; difficulty: string; solved: boolean }
+export type Summary = { slug: string; title: string; difficulty: string; solved: boolean; custom?: boolean; jd?: string | null }
 
 // A dropdown that marks solved problems and shows overall progress.
-export default function ProblemPicker({ list, value, onChange }: {
-  list: Summary[]; value: string | null; onChange: (slug: string) => void
+export default function ProblemPicker({ list, value, onChange, onDelete }: {
+  list: Summary[]; value: string | null; onChange: (slug: string) => void; onDelete: (p: Summary) => void
 }) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
@@ -26,24 +26,31 @@ export default function ProblemPicker({ list, value, onChange }: {
     </span>
   )
   const tag = (p: Summary) => <span className={'diff ' + p.difficulty.toLowerCase()}>{p.difficulty}</span>
+  const jd = (p: Summary) => p.custom && <span className="jd-tag" title="Generated from a job description">JD</span>
 
   return (
     <div className="pp" ref={root}>
       <button className="pp-btn" onClick={() => setOpen(o => !o)} aria-haspopup="listbox" aria-expanded={open}>
-        {current ? <>{mark(current)}<span className="pp-title">{current.title}</span>{tag(current)}</> : <span className="muted">No problems yet</span>}
+        {current ? <>{mark(current)}<span className="pp-title">{current.title}</span>{jd(current)}{tag(current)}</> : <span className="muted">No problems yet</span>}
         <span className="pp-caret">▾</span>
       </button>
       {open && (
         <div className="pp-menu" role="listbox">
           <div className="pp-head">{solved}/{list.length} solved</div>
           {list.map(p => (
-            <button
-              key={p.slug} role="option" aria-selected={p.slug === value}
-              className={'pp-item' + (p.slug === value ? ' active' : '')}
-              onClick={() => { onChange(p.slug); setOpen(false) }}
-            >
-              {mark(p)}<span className="pp-title">{p.title}</span>{tag(p)}
-            </button>
+            <div key={p.slug} className="pp-row">
+              <button
+                role="option" aria-selected={p.slug === value}
+                className={'pp-item' + (p.slug === value ? ' active' : '')}
+                onClick={() => { onChange(p.slug); setOpen(false) }}
+              >
+                {mark(p)}<span className="pp-title">{p.title}</span>{jd(p)}{tag(p)}
+              </button>
+              {p.custom && (
+                <button className="pp-del ghost" title="Delete this generated problem" aria-label={`Delete ${p.title}`}
+                  onClick={() => { setOpen(false); onDelete(p) }}>✕</button>
+              )}
+            </div>
           ))}
         </div>
       )}

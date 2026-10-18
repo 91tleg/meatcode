@@ -3,6 +3,7 @@ import Editor, { DiffEditor } from '@monaco-editor/react'
 import Markdown from 'react-markdown'
 import ProblemPicker, { type Summary } from './ProblemPicker'
 import CheatSheet from './CheatSheet'
+import CustomProblem, { type JdSummary } from './CustomProblem'
 
 type Test = { args: unknown[]; expected: unknown; hidden?: boolean }
 type Problem = Summary & {
@@ -51,6 +52,7 @@ const LANGS = [
   { id: 'javascript', label: 'JavaScript', monaco: 'javascript' },
   { id: 'rust', label: 'Rust', monaco: 'rust' },
   { id: 'cpp', label: 'C++', monaco: 'cpp' },
+  { id: 'c', label: 'C', monaco: 'c' },
 ]
 
 export default function App() {
@@ -75,6 +77,10 @@ export default function App() {
   const [active, setActive] = useState<ActiveFollowup | null>(null)
   const [diff, setDiff] = useState(false)
   const [sheetOpen, setSheetOpen] = useState(false)
+  const [modal, setModal] = useState<'new' | 'more' | null>(null)
+  const [jds, setJds] = useState<JdSummary[] | null>(null)
+  // Which problems the picker shows: everything, the built-in set, or the problems of one job description.
+  const [scope, setScope] = useState(() => { try { return localStorage.getItem('scope') || 'all' } catch { return 'all' } })
   const [draftVersion, setDraftVersion] = useState(0)
   const drafts = useRef<Record<string, string>>({})
   const saveTimers = useRef<Record<string, number>>({})
@@ -85,16 +91,44 @@ export default function App() {
   const refreshList = () =>
     fetch('/api/problems').then(r => r.json()).then((l: Summary[]) => { setList(l); return l }).catch(() => [] as Summary[])
 
+  const refreshJds = () =>
+    fetch('/api/jds').then(r => r.json()).then((j: JdSummary[]) => { setJds(j); return j }).catch(() => { setJds([]); return [] as JdSummary[] })
+
+  useEffect(() => { refreshList(); refreshJds() }, [])
+
+  // A remembered scope whose job description was deleted falls back to everything.
+  const eff = jds && scope !== 'all' && scope !== 'builtin' && !jds.some(j => j.id === scope) ? 'all' : scope
+  const jd = jds?.find(j => j.id === eff)
+  const visible = list.filter(p => eff === 'all' || (eff === 'builtin' ? !p.custom : p.jd === eff))
+  const changeScope = (s: string) => { setScope(s); try { localStorage.setItem('scope', s) } catch { /* private mode */ } }
+
+  // Keep the open problem inside the current scope (also picks the first one on load).
   useEffect(() => {
-    refreshList().then(l => { if (l.length) setSlug(l[0].slug) })
-  }, [])
+    if (list.length && (jds || eff === 'all' || eff === 'builtin') && !visible.some(p => p.slug === slug)) setSlug(visible[0]?.slug ?? null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list, jds, eff])
+
+  const deleteCustom = async (p: Summary) => {
+    if (!confirm(`Delete "${p.title}"? Your saved attempts for it stay in the database.`)) return
+    const r = await fetch(`/api/custom-problems/${p.slug}`, { method: 'DELETE' })
+    if (!r.ok) return
+    await Promise.all([refreshList(), refreshJds()])
+  }
+
+  const deleteJd = async () => {
+    if (!jd || !confirm(`Delete the job description "${jd.title}" and its ${jd.problems} problem(s)? Your saved attempts stay in the database.`)) return
+    const r = await fetch(`/api/jds/${jd.id}`, { method: 'DELETE' })
+    if (!r.ok) return
+    changeScope('all')
+    await Promise.all([refreshList(), refreshJds()])
+  }
 
   const refreshHistory = (sl: string) =>
     fetch(`/api/problems/${sl}/submissions`).then(r => r.json()).then(setHistory).catch(() => {})
 
   // Load the problem, its saved drafts and its past attempts together.
   useEffect(() => {
-    if (!slug) return
+    if (!slug) { setProblem(null); return }
     let stale = false
     setResult(null); setSubmissionId(null); setReview(null); setReviewErr(null); setHistory([])
     setProposed(null); setActive(null); setDiff(false)
@@ -225,7 +259,24 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <h1>meatcode</h1>
-        <ProblemPicker list={list} value={slug} onChange={setSlug} />
+        <select
+          value={eff} title="Show problems from"
+          onChange={e => e.target.value === '__new' ? setModal('new') : changeScope(e.target.value)}
+        >
+          <option value="all">All problems ({list.length})</option>
+          <option value="builtin">Built-in ({list.filter(p => !p.custom).length})</option>
+          {(jds ?? []).map(j => <option key={j.id} value={j.id}>JD: {j.title} ({j.solved}/{j.problems})</option>)}
+          <option value="__new">+ New job description…</option>
+        </select>
+        <ProblemPicker list={visible} value={slug} onChange={setSlug} onDelete={deleteCustom} />
+        {jd ? (
+          <>
+            <button onClick={() => setModal('more')} title="Generate another problem for this job description">+ Problem</button>
+            <button className="ghost" onClick={deleteJd} title="Delete this job description and its problems">Delete JD</button>
+          </>
+        ) : (
+          <button onClick={() => setModal('new')} title="Generate problems from a job description">+ Job description</button>
+        )}
         <span className="spacer" />
         <button onClick={() => setSheetOpen(o => !o)} className={sheetOpen ? 'primary' : ''}>Cheatsheet</button>
       </header>
@@ -359,8 +410,19 @@ export default function App() {
             </div>
           </section>
         </>
-      ) : <div className="empty muted">No problems yet. Add JSON files to <code>problems/</code>.</div>}
+      ) : <div className="empty muted">{jd ? <>No problems left in this job description. Click <b>+ Problem</b>.</> : <>No problems yet. Add JSON files to <code>problems/</code>.</>}</div>}
       </main>
+      {modal && (
+        <CustomProblem
+          jd={modal === 'more' ? jd : undefined}
+          onClose={() => setModal(null)}
+          onCreated={async p => {
+            await Promise.all([refreshList(), refreshJds()])
+            if (p.jd) changeScope(p.jd)
+            setSlug(p.slug); setModal(null)
+          }}
+        />
+      )}
       {sheetOpen && <CheatSheet onClose={() => setSheetOpen(false)} />}
     </div>
   )

@@ -160,13 +160,9 @@ This is the last round for this problem: do not propose another follow-up.
     }
 }
 
-pub async fn review(
-    p: &Problem,
-    language: &str,
-    code: &str,
-    result: &serde_json::Value,
-    kind: Kind<'_>,
-) -> Result<ReviewOut, String> {
+/// Run the local `claude` CLI once (no tools, no session, minimal system prompt) and return its JSON envelope.
+/// With a schema, the validated object is in `structured_output`; without one, the text is in `result`.
+pub async fn ask_claude(input: String, schema: Option<&str>) -> Result<serde_json::Value, String> {
     let mut args: Vec<&str> = vec![
         "-p",
         "--tools",
@@ -182,8 +178,8 @@ pub async fn review(
         "--output-format",
         "json",
     ];
-    if matches!(kind, Kind::Initial) {
-        args.extend(["--json-schema", SCHEMA]);
+    if let Some(schema) = schema {
+        args.extend(["--json-schema", schema]);
     }
     let mut child = Command::new("claude")
         .args(&args)
@@ -195,14 +191,13 @@ pub async fn review(
         .spawn()
         .map_err(|e| format!("could not launch the `claude` CLI: {e}"))?;
     let mut stdin = child.stdin.take().unwrap();
-    let input = prompt(p, language, code, result, &kind);
-    eprintln!("review prompt: {} chars (~{} tokens)", input.len(), input.len() / 4);
+    eprintln!("claude prompt: {} chars (~{} tokens)", input.len(), input.len() / 4);
     tokio::spawn(async move {
         let _ = stdin.write_all(input.as_bytes()).await;
     });
     let out = timeout(REVIEW_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| "review timed out".to_string())?
+        .map_err(|_| "claude timed out".to_string())?
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!("claude exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr)));
@@ -211,6 +206,18 @@ pub async fn review(
     if v["is_error"] == true {
         return Err(format!("claude error: {}", v["result"].as_str().unwrap_or("unknown")));
     }
+    Ok(v)
+}
+
+pub async fn review(
+    p: &Problem,
+    language: &str,
+    code: &str,
+    result: &serde_json::Value,
+    kind: Kind<'_>,
+) -> Result<ReviewOut, String> {
+    let schema = matches!(kind, Kind::Initial).then_some(SCHEMA);
+    let v = ask_claude(prompt(p, language, code, result, &kind), schema).await?;
     match kind {
         Kind::FollowUp { .. } => Ok(ReviewOut { markdown: v["result"].as_str().unwrap_or("").trim().to_string(), followup: None }),
         Kind::Initial => {

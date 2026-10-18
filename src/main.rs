@@ -1,3 +1,4 @@
+mod custom;
 mod db;
 mod harness;
 mod review;
@@ -49,18 +50,43 @@ pub struct Problem {
     #[serde(default)]
     pub sort_result: bool,
     pub tests: Vec<TestCase>,
+    /// Generated from a job description (lives in the custom directory and can be deleted).
+    #[serde(default)]
+    pub custom: bool,
+    /// Id of the job description this problem was generated for.
+    #[serde(default)]
+    pub jd: Option<String>,
 }
 
 #[derive(Clone)]
 struct AppState {
     dir: Arc<PathBuf>,
+    /// Problems generated from job descriptions; kept apart from the checked-in set.
+    custom: Arc<PathBuf>,
     sheets: Arc<PathBuf>,
     db: SqlitePool,
 }
 
 // Problems are re-read from disk on every request so new files appear without a restart.
-fn load_all(dir: &PathBuf) -> Vec<Problem> {
-    let mut out: Vec<Problem> = std::fs::read_dir(dir)
+fn load_all(s: &AppState) -> Vec<Problem> {
+    let mut out = load_dir(&s.dir);
+    let known: Vec<String> = out.iter().map(|p| p.slug.clone()).collect();
+    out.extend(load_custom(&s.custom).into_iter().filter(|p| !known.contains(&p.slug)));
+    out.sort_by(|a, b| a.title.cmp(&b.title));
+    out
+}
+
+/// Problems made from job descriptions: one subfolder per description, plus any loose files in the root.
+fn load_custom(root: &PathBuf) -> Vec<Problem> {
+    let mut out: Vec<Problem> = load_dir(root).into_iter().map(|p| Problem { custom: true, jd: None, ..p }).collect();
+    for jd in custom::list_jds(root) {
+        out.extend(load_dir(&root.join(&jd.id)).into_iter().map(|p| Problem { custom: true, jd: Some(jd.id.clone()), ..p }));
+    }
+    out
+}
+
+fn load_dir(dir: &PathBuf) -> Vec<Problem> {
+    std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -75,13 +101,11 @@ fn load_all(dir: &PathBuf) -> Vec<Problem> {
                 }
             }
         })
-        .collect();
-    out.sort_by(|a: &Problem, b| a.title.cmp(&b.title));
-    out
+        .collect()
 }
 
-fn find(dir: &PathBuf, slug: &str) -> Option<Problem> {
-    load_all(dir).into_iter().find(|p| p.slug == slug)
+fn find(s: &AppState, slug: &str) -> Option<Problem> {
+    load_all(s).into_iter().find(|p| p.slug == slug)
 }
 
 #[derive(Serialize)]
@@ -91,15 +115,19 @@ struct Summary {
     difficulty: String,
     /// Some submission passed every test in the current suite.
     solved: bool,
+    custom: bool,
+    jd: Option<String>,
 }
 
 async fn list(State(s): State<AppState>) -> Result<Json<Vec<Summary>>, StatusCode> {
     let passed = db::fully_passed(&s.db).await.map_err(log_err)?;
     Ok(Json(
-        load_all(&s.dir)
+        load_all(&s)
             .into_iter()
             .map(|p| Summary {
                 solved: passed.contains(&(p.slug.clone(), p.tests.len() as i64)),
+                custom: p.custom,
+                jd: p.jd,
                 slug: p.slug,
                 title: p.title,
                 difficulty: p.difficulty,
@@ -168,7 +196,7 @@ async fn get_problem(
     State(s): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<Json<ProblemView>, StatusCode> {
-    let mut p = find(&s.dir, &slug).ok_or(StatusCode::NOT_FOUND)?;
+    let mut p = find(&s, &slug).ok_or(StatusCode::NOT_FOUND)?;
     // Never send hidden tests to the browser.
     p.tests.retain(|t| !t.hidden);
     let starter = match (&p.sql, &p.function) {
@@ -207,7 +235,7 @@ async fn run(
     Json(req): Json<RunReq>,
 ) -> Result<Json<runner::RunResult>, (StatusCode, String)> {
     let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
-    let p = find(&s.dir, &slug).ok_or((StatusCode::NOT_FOUND, "no such problem".into()))?;
+    let p = find(&s, &slug).ok_or((StatusCode::NOT_FOUND, "no such problem".into()))?;
     // A follow-up must build on a reviewed first attempt of this problem; there is only one round.
     let parent = match (req.submit, req.parent_id) {
         (true, Some(id)) => {
@@ -285,7 +313,7 @@ async fn review(
     if let (Some(saved), false) = (&sub.review, req.force) {
         return Ok(Json(ReviewResp { review: saved.clone(), followup: sub.proposed_followup.clone() }));
     }
-    let p = find(&s.dir, &sub.slug).ok_or((StatusCode::NOT_FOUND, "problem no longer exists".into()))?;
+    let p = find(&s, &sub.slug).ok_or((StatusCode::NOT_FOUND, "problem no longer exists".into()))?;
     // A follow-up attempt is reviewed against the attempt it was built from, and is the last round.
     let base = match sub.parent_id {
         Some(id) => Some(
@@ -336,16 +364,116 @@ async fn delete_draft(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct NewJdReq {
+    jd: String,
+    title: Option<String>,
+    #[serde(flatten)]
+    gen: GenReq,
+}
+
+#[derive(Deserialize)]
+struct GenReq {
+    difficulty: Option<String>,
+    /// Optional topic the person wants to practice, e.g. "graphs".
+    focus: Option<String>,
+}
+
+#[derive(Serialize)]
+struct JdSummary {
+    id: String,
+    title: String,
+    problems: usize,
+    solved: usize,
+}
+
+async fn list_jds(State(s): State<AppState>) -> Result<Json<Vec<JdSummary>>, StatusCode> {
+    let passed = db::fully_passed(&s.db).await.map_err(log_err)?;
+    let all = load_all(&s);
+    Ok(Json(
+        custom::list_jds(&s.custom)
+            .into_iter()
+            .map(|j| {
+                let mine: Vec<&Problem> = all.iter().filter(|p| p.jd.as_deref() == Some(j.id.as_str())).collect();
+                let solved = mine.iter().filter(|p| passed.contains(&(p.slug.clone(), p.tests.len() as i64))).count();
+                JdSummary { id: j.id, title: j.title, problems: mine.len(), solved }
+            })
+            .collect(),
+    ))
+}
+
+fn check_jd_text(jd: &str) -> Result<(), (StatusCode, String)> {
+    let n = jd.chars().count();
+    if (custom::MIN_JD_CHARS..=custom::MAX_JD_CHARS).contains(&n) {
+        return Ok(());
+    }
+    Err((StatusCode::BAD_REQUEST, format!("The job description must be {}-{} characters (it is {n}).", custom::MIN_JD_CHARS, custom::MAX_JD_CHARS)))
+}
+
+/// Generate, verify and save one problem under `jd` (see `custom.rs`).
+async fn add_problem(s: &AppState, jd: &custom::Jd, req: &GenReq) -> Result<Summary, (StatusCode, String)> {
+    let difficulty = match req.difficulty.as_deref() {
+        Some(d @ ("Easy" | "Medium" | "Hard")) => d,
+        _ => "Medium",
+    };
+    let focus: String = req.focus.as_deref().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
+    let all = load_all(s);
+    let taken: Vec<String> = all.iter().map(|p| p.slug.clone()).collect();
+    let existing: Vec<String> = all.iter().filter(|p| p.jd.as_deref() == Some(jd.id.as_str())).map(|p| p.title.clone()).collect();
+    let mut p = custom::generate(&jd.text, difficulty, &focus, &existing, &taken).await.map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    p.jd = Some(jd.id.clone());
+    custom::save(&s.custom, jd, &p).map_err(internal)?;
+    Ok(Summary { slug: p.slug, title: p.title, difficulty: p.difficulty, solved: false, custom: true, jd: p.jd })
+}
+
+/// A new job description plus its first problem. Nothing is saved unless the problem verifies.
+async fn create_jd(State(s): State<AppState>, Json(req): Json<NewJdReq>) -> Result<Json<Summary>, (StatusCode, String)> {
+    let text = req.jd.trim();
+    check_jd_text(text)?;
+    let jd = custom::new_jd(&s.custom, req.title.as_deref(), text);
+    Ok(Json(add_problem(&s, &jd, &req.gen).await?))
+}
+
+/// Another problem for an existing job description, on a different skill than the ones it already has.
+async fn add_to_jd(State(s): State<AppState>, Path(id): Path<String>, Json(req): Json<GenReq>) -> Result<Json<Summary>, (StatusCode, String)> {
+    let jd = custom::load_jd(&s.custom, &id).ok_or((StatusCode::NOT_FOUND, "no such job description".into()))?;
+    Ok(Json(add_problem(&s, &jd, &req).await?))
+}
+
+/// Remove a job description and every problem generated for it. Saved attempts stay in the database.
+async fn delete_jd(State(s): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, StatusCode> {
+    custom::load_jd(&s.custom, &id).ok_or(StatusCode::NOT_FOUND)?;
+    std::fs::remove_dir_all(s.custom.join(&id)).map_err(log_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_custom(State(s): State<AppState>, Path(slug): Path<String>) -> Result<StatusCode, StatusCode> {
+    if !custom::valid_id(&slug) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Only files inside the custom directory are ever removed: the root itself or one job description folder.
+    let mut dirs = vec![(*s.custom).clone()];
+    dirs.extend(custom::list_jds(&s.custom).into_iter().map(|j| s.custom.join(j.id)));
+    let file = dirs.iter().map(|d| d.join(format!("{slug}.json"))).find(|f| f.is_file()).ok_or(StatusCode::NOT_FOUND)?;
+    std::fs::remove_file(file).map_err(log_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[tokio::main]
 async fn main() {
     let dir = std::env::var("PROBLEMS_DIR").unwrap_or_else(|_| "problems".into());
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "meatcode.db".into());
     let db = db::connect(&db_path).await.expect("could not open the SQLite database");
     let sheets = std::env::var("CHEATSHEETS_DIR").unwrap_or_else(|_| "cheatsheets".into());
-    let state = AppState { dir: Arc::new(PathBuf::from(dir)), sheets: Arc::new(PathBuf::from(sheets)), db };
+    let custom = std::env::var("CUSTOM_PROBLEMS_DIR").unwrap_or_else(|_| "custom-problems".into());
+    let state = AppState { dir: Arc::new(PathBuf::from(dir)), custom: Arc::new(PathBuf::from(custom)), sheets: Arc::new(PathBuf::from(sheets)), db };
     let app = Router::new()
         .route("/api/problems", get(list))
         .route("/api/problems/{slug}", get(get_problem))
+        .route("/api/jds", get(list_jds).post(create_jd))
+        .route("/api/jds/{id}", axum::routing::delete(delete_jd))
+        .route("/api/jds/{id}/problems", post(add_to_jd))
+        .route("/api/custom-problems/{slug}", axum::routing::delete(delete_custom))
         .route("/api/cheatsheets", get(list_sheets))
         .route("/api/cheatsheets/{slug}", get(get_sheet))
         .route("/api/problems/{slug}/run", post(run))

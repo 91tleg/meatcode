@@ -241,3 +241,61 @@ pub async fn run(lang: &str, code: &str, p: &Problem, tests: &[TestCase]) -> Run
     shrink(&mut out);
     out
 }
+
+/// Run `code` once per argument list and return each decoded return value, or why that run failed.
+/// Used to derive expected outputs from executed reference solutions instead of trusting written ones.
+pub async fn execute(
+    lang: &str,
+    sig: &crate::types::Signature,
+    code: &str,
+    inputs: &[Vec<serde_json::Value>],
+) -> Result<Vec<Result<serde_json::Value, String>>, String> {
+    let (ptys, ret) = sig.types()?;
+    let mut stdin_data = Vec::new();
+    for args in inputs {
+        if args.len() != ptys.len() {
+            return Err(format!("test has {} args but the function takes {}", args.len(), ptys.len()));
+        }
+        let mut s = String::new();
+        for (ty, a) in ptys.iter().zip(args) {
+            s += &ty.encode(a)?;
+        }
+        stdin_data.push(s);
+    }
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir: PathBuf = std::env::temp_dir().join(format!("meatcode-{}-{id}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let argv = prepare(lang, &harness::wrap(lang, sig, code)?, &dir).await;
+    let mut outs = Vec::new();
+    if let Ok(argv) = &argv {
+        for data in stdin_data {
+            outs.push(capture(argv, data).await.and_then(|text| ret.decode(&text).ok_or_else(|| format!("unparseable output: {text:?}"))));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    argv.map(|_| outs)
+}
+
+async fn capture(argv: &[String], stdin_data: String) -> Result<String, String> {
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("failed to launch: {e}"))?;
+    let mut stdin = child.stdin.take().unwrap();
+    tokio::spawn(async move {
+        let _ = stdin.write_all(stdin_data.as_bytes()).await;
+    });
+    let out = timeout(RUN_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| "timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("crashed: {}", err.lines().last().unwrap_or("")));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
