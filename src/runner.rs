@@ -55,6 +55,11 @@ async fn prepare(lang: &str, code: &str, dir: &Path) -> Result<Vec<String>, Stri
             compile(&["c++", "-O2", "-std=c++17", "-o", &file("out"), &file("main.cpp")]).await?;
             Ok(vec![file("out")])
         }
+        "c" => {
+            std::fs::write(dir.join("main.c"), code).map_err(|e| e.to_string())?;
+            compile(&["cc", "-O2", "-std=c11", "-o", &file("out"), &file("main.c"), "-lm"]).await?;
+            Ok(vec![file("out")])
+        }
         other => Err(format!("unsupported language: {other}")),
     }
 }

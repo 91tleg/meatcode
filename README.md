@@ -1,7 +1,7 @@
 # meatcode
 
 Local LeetCode-style practice. Axum API (`src/`) + React/Vite UI (`web/`).
-Languages: Python, JavaScript, Rust, C++ (uses local `python3`, `node`, `rustc`, `c++`).
+Languages: Python, JavaScript, Rust, C++, C (uses local `python3`, `node`, `rustc`, `c++`, `cc`).
 
     cargo run                         # API on :3000
     cd web && npm run dev             # UI on :5173
@@ -26,6 +26,22 @@ Click **Work on this follow-up** to edit your solution in place; the question st
 **Compare with first attempt** shows a diff. Submit again and **Review follow-up** checks the tests and whether the
 constraint is really met. That is the only follow-up round for a problem. Reviews are saved per submission
 (**Regenerate review** asks again). It runs the local `claude` CLI (needs Claude Code installed and logged in).
+
+## C
+Your solution may not allocate. `malloc`, `calloc`, `realloc`, `free`, `strdup`,
+`getline` and `alloca` are poisoned, so using one is a compile error. The test harness around it is not restricted.
+Plain C11 (`cc -O2 -std=c11 -lm`), fixed-width types only: `int` is `int64_t`, lengths are `int32_t`, plus `double`,
+`bool` and `const char*`; stdio, stdlib, string, stdint, inttypes, limits, float, math, ctype and assert are pre-included.
+
+Inputs are read-only and carry their length (`xs, xs_len`); matrices come as `m, m_rows, m_cols`. Results go into a buffer
+the caller provides, and the function returns how many items it wrote (an out-of-range count fails the test):
+- `int[]` / `float[]`: `int32_t f(..., int64_t* ret, int32_t ret_cap)` (or `double*`)
+- `string`: `int32_t f(..., char* ret, int32_t ret_cap)`, returns the length
+- `string[]`: same signature, strings back to back each NUL-terminated, returns the count
+- `int[][]`: `int32_t f(..., int64_t* ret, int32_t ret_cap, int32_t* ret_cols, int32_t ret_rows_cap)`, rows row-major, each
+  width in `ret_cols[i]`, returns the row count
+
+Buffers hold 1,048,576 elements (262,144 rows). The starter code shows the exact signature for each problem.
 
 ## Adding problems
 Drop a JSON file in `problems/` (picked up without restart). Users only write a function;
